@@ -2,6 +2,10 @@
 
 This repo is a resource of layouts and templates that can be used in any project. New templates are added weekly. 
 
+## Demos
+
+You can preview all of the templates and layouts on this landing page here. [Preview Templates](http://templates.digizu.co.uk/)
+
 ## Built With
 
 * [Tailwind CSS](https://tailwindcss.com/) - CSS Framework
