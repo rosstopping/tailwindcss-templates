@@ -4,7 +4,7 @@ This repo is a resource of layouts and templates that can be used in any project
 
 ## Demos
 
-You can preview all of the templates and layouts on this landing page here. [Preview Templates](http://templates.digizu.co.uk/)
+You can preview all of the templates and layouts on this landing page here. [Preview Templates](https://templates.digizu.co.uk/)
 
 ## Built With
 
