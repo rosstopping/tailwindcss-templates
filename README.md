@@ -12,7 +12,7 @@ You can preview all of the templates and layouts on this landing page here. [Pre
 
 ## Authors
 
-* **Ross McNeil** - [Digizu](https://digizu.co.uk)
+* **Ross Topping** - [Digizu](https://digizu.co.uk)
 
 ## License
 
