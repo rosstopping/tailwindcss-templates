@@ -6,6 +6,11 @@ This repo is a resource of layouts and templates that can be used in any project
 
 You can preview all of the templates and layouts on this landing page here. [Preview Templates](https://templates.digizu.co.uk/)
 
+## High Quality Premium Templates - Novolio
+
+A collection of premium high quality website design templates, built using the latest technologies and ready to download and start using today. 
+ [View Templates](https://novolio.dev)
+
 ## Built With
 
 * [Tailwind CSS](https://tailwindcss.com/) - CSS Framework
