@@ -1,6 +1,6 @@
 # Tailwind CSS Layouts & Templates
 
-This repo is a resource of layouts and templates that can be used in any project. New templates are added weekly. 
+This repo is a resource of layouts and templates that can be used in any project.
 
 ## Demos
 
