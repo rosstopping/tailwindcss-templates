@@ -1,0 +1,55 @@
+name: Dependabot security auto-merge
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: write
+  pull-requests: write
+  security-events: read
+jobs:
+  enable-auto-merge:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Dependabot security update
+        id: metadata
+        uses: dependabot/fetch-metadata@d7267f607e9d3fb96fc2fbe83e0af444713e90b7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          alert-lookup: true
+      - name: Enable auto-merge after required checks
+        if: >-
+          steps.metadata.outputs.alert-state == 'OPEN' &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+           steps.metadata.outputs.update-type == 'version-update:semver-minor')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          protection=$(gh api "repos/$GH_REPO/branches/$BASE_BRANCH/protection" 2>/dev/null || echo '{}')
+          rules=$(gh api "repos/$GH_REPO/rules/branches/$BASE_BRANCH" 2>/dev/null || echo '[]')
+          required=$(jq -n --argjson p "$protection" --argjson r "$rules" '
+            (($p.required_status_checks.contexts // []) | length) +
+            (($p.required_status_checks.checks // []) | length) +
+            ([$r[] | select(.type == "required_status_checks") |
+              .parameters.required_status_checks[]?] | length)')
+          if [ "$required" -eq 0 ]; then
+            echo 'Automatic merge needs required CI checks on the default branch. Leaving this PR open.'
+            exit 0
+          fi
+          files=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')
+          while IFS= read -r file; do
+            case "$file" in
+              */composer.json|composer.json|*/composer.lock|composer.lock|*/package.json|package.json|*/package-lock.json|package-lock.json|*/npm-shrinkwrap.json|npm-shrinkwrap.json|*/yarn.lock|yarn.lock|*/pnpm-lock.yaml|pnpm-lock.yaml|*/Gemfile|Gemfile|*/Gemfile.lock|Gemfile.lock|*/requirements*.txt|requirements*.txt|*/poetry.lock|poetry.lock|*/pyproject.toml|pyproject.toml|*/uv.lock|uv.lock|*/go.mod|go.mod|*/go.sum|go.sum|*/Cargo.toml|Cargo.toml|*/Cargo.lock|Cargo.lock|*/packages.lock.json|packages.lock.json|*.csproj|*.fsproj|*.vbproj) ;;
+              *) echo "File needs manual review: $file"; exit 0 ;;
+            esac
+          done <<< "$files"
+          gh pr merge "$PR_NUMBER" --auto --squash --match-head-commit "$HEAD_SHA"
