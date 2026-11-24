@@ -1,0 +1,142 @@
+name: Security dependency validation
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dependency-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  dependency-validation:
+    name: Dependency validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: true
+    steps:
+      - name: Checkout proposed changes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup PHP
+        uses: shivammathur/setup-php@d52fc211a0436f8839a587b3b5b8efddab4744ea
+        with:
+          php-version: '8.3'
+          extensions: bcmath, gd, intl, mbstring, pdo_sqlite, pcntl, redis, zip
+          tools: composer:v2
+          coverage: none
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install Composer dependencies without executing project code
+        env:
+          INSTALL_COMPOSER_ONLY: '1'
+          COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import json,pathlib,subprocess,os
+          root=pathlib.Path.cwd()
+          def run(args,cwd=root,extra=None):
+           env=os.environ.copy();env.update(extra or {});subprocess.run(args,cwd=cwd,env=env,check=True)
+          paths=['.']
+          event=json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          if 'pull_request' in event:
+           base=event['pull_request']['base']['sha'];head=event['pull_request']['head']['sha'];changed=subprocess.check_output(['git','diff','--name-only',base,head],text=True).splitlines()
+           for name in changed:
+            p=pathlib.Path(name).parent
+            while p!=pathlib.Path('.'):
+             if (p/'composer.json').exists() or (p/'package.json').exists():
+              paths.append(str(p));break
+             p=p.parent
+          paths=list(dict.fromkeys(paths))
+          # Credentials committed before this automation must not reach package scripts.
+          for p in root.rglob('auth.json'):
+           if '.git' not in p.parts and 'node_modules' not in p.parts and 'vendor' not in p.parts:p.unlink()
+          install_only=os.environ.get('INSTALL_COMPOSER_ONLY')=='1'
+          auth=os.environ.get('COMPOSER_AUTH','')
+          for path in paths:
+           d=root/path
+           if (d/'composer.json').exists():
+            if install_only:
+             run(['composer','validate','--no-check-publish'],d)
+             run(['composer','install','--no-interaction','--prefer-dist','--no-scripts','--no-plugins','--no-progress'],d,{'COMPOSER_AUTH':auth})
+             continue
+            run(['composer','check-platform-reqs'],d)
+            for folder in ['app','src']:
+             if (d/folder).exists():
+              for p in (d/folder).rglob('*.php'):run(['php','-l',str(p)],d)
+           if install_only:continue
+           if (d/'package.json').exists():
+            package=json.load(open(d/'package.json'));scripts=package.get('scripts',{});manager=package.get('packageManager','').split('@')[0]
+            if not manager:manager='pnpm' if (d/'pnpm-lock.yaml').exists() else 'yarn' if (d/'yarn.lock').exists() and not (d/'package-lock.json').exists() else 'npm'
+            if manager in ['yarn','pnpm']:run(['corepack','enable'])
+            if manager=='pnpm':run(['pnpm','install','--frozen-lockfile'],d)
+            elif manager=='yarn':run(['yarn','install','--frozen-lockfile','--non-interactive'],d)
+            else:run(['npm','ci' if (d/'package-lock.json').exists() else 'install','--no-audit','--no-fund'],d)
+            build='build' if 'build' in scripts else 'production' if 'production' in scripts else 'generate' if 'generate' in scripts else None
+            if build:run([manager,'run',build],d)
+            test=scripts.get('test','')
+            if test and 'no test specified' not in test.lower() and not any(x in test for x in ['artisan','composer','concurrently','--watch']):run([manager,'run','test','--','--runInBand'] if 'react-scripts test' in test else [manager,'run','test'],d,{'CI':'true'})
+           if (d/'.env.testing').exists() and (d/'vendor/bin/phpunit').exists():
+            env={'APP_ENV':'testing','APP_KEY':'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=','APP_URL':'http://localhost','DB_CONNECTION':'sqlite','DB_DATABASE':':memory:','DB_URL':'','DATABASE_URL':'','MAIL_MAILER':'array','QUEUE_CONNECTION':'sync','CACHE_STORE':'array','CACHE_DRIVER':'array','SESSION_DRIVER':'array','GOOGLE_TAG_MANAGER_ENABLED':'false'}
+            if (d/'artisan').exists():run(['php','artisan','package:discover','--ansi'],d,env)
+            runner='vendor/bin/pest' if (d/'vendor/bin/pest').exists() else 'vendor/bin/phpunit';run(['php',runner],d,env)
+          print('Dependency installation, compilation and available tests passed.')
+          PYCODE
+      - name: Validate dependencies, build and test
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import json,pathlib,subprocess,os
+          root=pathlib.Path.cwd()
+          def run(args,cwd=root,extra=None):
+           env=os.environ.copy();env.update(extra or {});subprocess.run(args,cwd=cwd,env=env,check=True)
+          paths=['.']
+          event=json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          if 'pull_request' in event:
+           base=event['pull_request']['base']['sha'];head=event['pull_request']['head']['sha'];changed=subprocess.check_output(['git','diff','--name-only',base,head],text=True).splitlines()
+           for name in changed:
+            p=pathlib.Path(name).parent
+            while p!=pathlib.Path('.'):
+             if (p/'composer.json').exists() or (p/'package.json').exists():
+              paths.append(str(p));break
+             p=p.parent
+          paths=list(dict.fromkeys(paths))
+          # Credentials committed before this automation must not reach package scripts.
+          for p in root.rglob('auth.json'):
+           if '.git' not in p.parts and 'node_modules' not in p.parts and 'vendor' not in p.parts:p.unlink()
+          install_only=os.environ.get('INSTALL_COMPOSER_ONLY')=='1'
+          auth=os.environ.get('COMPOSER_AUTH','')
+          for path in paths:
+           d=root/path
+           if (d/'composer.json').exists():
+            if install_only:
+             run(['composer','validate','--no-check-publish'],d)
+             run(['composer','install','--no-interaction','--prefer-dist','--no-scripts','--no-plugins','--no-progress'],d,{'COMPOSER_AUTH':auth})
+             continue
+            run(['composer','check-platform-reqs'],d)
+            for folder in ['app','src']:
+             if (d/folder).exists():
+              for p in (d/folder).rglob('*.php'):run(['php','-l',str(p)],d)
+           if install_only:continue
+           if (d/'package.json').exists():
+            package=json.load(open(d/'package.json'));scripts=package.get('scripts',{});manager=package.get('packageManager','').split('@')[0]
+            if not manager:manager='pnpm' if (d/'pnpm-lock.yaml').exists() else 'yarn' if (d/'yarn.lock').exists() and not (d/'package-lock.json').exists() else 'npm'
+            if manager in ['yarn','pnpm']:run(['corepack','enable'])
+            if manager=='pnpm':run(['pnpm','install','--frozen-lockfile'],d)
+            elif manager=='yarn':run(['yarn','install','--frozen-lockfile','--non-interactive'],d)
+            else:run(['npm','ci' if (d/'package-lock.json').exists() else 'install','--no-audit','--no-fund'],d)
+            build='build' if 'build' in scripts else 'production' if 'production' in scripts else 'generate' if 'generate' in scripts else None
+            if build:run([manager,'run',build],d)
+            test=scripts.get('test','')
+            if test and 'no test specified' not in test.lower() and not any(x in test for x in ['artisan','composer','concurrently','--watch']):run([manager,'run','test','--','--runInBand'] if 'react-scripts test' in test else [manager,'run','test'],d,{'CI':'true'})
+           if (d/'.env.testing').exists() and (d/'vendor/bin/phpunit').exists():
+            env={'APP_ENV':'testing','APP_KEY':'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=','APP_URL':'http://localhost','DB_CONNECTION':'sqlite','DB_DATABASE':':memory:','DB_URL':'','DATABASE_URL':'','MAIL_MAILER':'array','QUEUE_CONNECTION':'sync','CACHE_STORE':'array','CACHE_DRIVER':'array','SESSION_DRIVER':'array','GOOGLE_TAG_MANAGER_ENABLED':'false'}
+            if (d/'artisan').exists():run(['php','artisan','package:discover','--ansi'],d,env)
+            runner='vendor/bin/pest' if (d/'vendor/bin/pest').exists() else 'vendor/bin/phpunit';run(['php',runner],d,env)
+          print('Dependency installation, compilation and available tests passed.')
+          PYCODE

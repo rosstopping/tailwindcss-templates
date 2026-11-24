@@ -2,59 +2,143 @@ name: Dependabot security auto-merge
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
+concurrency:
+  group: security-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
-  enable-auto-merge:
+  security-update:
+    name: Security update merge
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.base.ref == github.event.repository.default_branch
     runs-on: ubuntu-latest
-    env:
-      DEPENDABOT_ALERTS_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+    timeout-minutes: 35
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+      actions: read
+      vulnerability-alerts: read
     steps:
-      - name: Check security-alert credentials
-        if: env.DEPENDABOT_ALERTS_TOKEN == ''
-        run: echo "Security auto-merge needs a Dependabot alerts read token in DEPENDABOT_ALERTS_TOKEN. Leaving this PR open."
-      - name: Verify Dependabot security update
+      - name: Verify signed Dependabot update and security alert
         id: metadata
-        if: env.DEPENDABOT_ALERTS_TOKEN != ''
-        uses: dependabot/fetch-metadata@d7267f607e9d3fb96fc2fbe83e0af444713e90b7
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98
         with:
-          github-token: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
-          alert-lookup: true
-      - name: Enable auto-merge after required checks
-        if: >-
-          steps.metadata.outputs.alert-state == 'OPEN' &&
-          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
-           steps.metadata.outputs.update-type == 'version-update:semver-minor')
+          github-token: ${{ github.token }}
+      - name: Merge verified security update after CI
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
         shell: bash
         run: |
-          set -euo pipefail
-          protection=$(gh api "repos/$GH_REPO/branches/$BASE_BRANCH/protection" 2>/dev/null || echo '{}')
-          rules=$(gh api "repos/$GH_REPO/rules/branches/$BASE_BRANCH" 2>/dev/null || echo '[]')
-          required=$(jq -n --argjson p "$protection" --argjson r "$rules" '
-            (($p.required_status_checks.contexts // []) | length) +
-            (($p.required_status_checks.checks // []) | length) +
-            ([$r[] | select(.type == "required_status_checks") |
-              .parameters.required_status_checks[]?] | length)')
-          if [ "$required" -eq 0 ]; then
-            echo 'Automatic merge needs required CI checks on the default branch. Leaving this PR open.'
-            exit 0
-          fi
-          files=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')
-          while IFS= read -r file; do
-            case "$file" in
-              */composer.json|composer.json|*/composer.lock|composer.lock|*/package.json|package.json|*/package-lock.json|package-lock.json|*/npm-shrinkwrap.json|npm-shrinkwrap.json|*/yarn.lock|yarn.lock|*/pnpm-lock.yaml|pnpm-lock.yaml|*/Gemfile|Gemfile|*/Gemfile.lock|Gemfile.lock|*/requirements*.txt|requirements*.txt|*/poetry.lock|poetry.lock|*/pyproject.toml|pyproject.toml|*/uv.lock|uv.lock|*/go.mod|go.mod|*/go.sum|go.sum|*/Cargo.toml|Cargo.toml|*/Cargo.lock|Cargo.lock|*/packages.lock.json|packages.lock.json|*.csproj|*.fsproj|*.vbproj) ;;
-              *) echo "File needs manual review: $file"; exit 0 ;;
-            esac
-          done <<< "$files"
-          gh pr merge "$PR_NUMBER" --auto --squash --match-head-commit "$HEAD_SHA"
+          python3 - <<'PYCODE'
+          import json,os,subprocess,time,pathlib,sys
+          repo=os.environ['GH_REPO'];number=os.environ['PR_NUMBER'];expected=os.environ['HEAD_SHA']
+          def api(path):
+           p=subprocess.run(['gh','api','--paginate',path,'--slurp'],text=True,capture_output=True,check=True);pages=json.loads(p.stdout)
+           if len(pages)==1:return pages[0]
+           if all(isinstance(p,list) for p in pages):return sum(pages,[])
+           for key in ['workflow_runs','check_runs','statuses']:
+            if all(isinstance(p,dict) and key in p for p in pages):return {**pages[0],key:sum([p[key] for p in pages],[])}
+           return pages
+          def eligible(pr,files):
+           if pr['state']!='open' or pr.get('draft') or pr['head']['sha']!=expected:return False
+           if pr['user']['login']!='dependabot[bot]' or pr['head']['repo']['full_name']!=repo:return False
+           if pr['base']['ref']!=os.environ['BASE_BRANCH']:return False
+           allowed={'composer.json','composer.lock','package.json','package-lock.json','npm-shrinkwrap.json','yarn.lock','pnpm-lock.yaml','Gemfile','Gemfile.lock','requirements.txt','poetry.lock','pyproject.toml','uv.lock','go.mod','go.sum','Cargo.toml','Cargo.lock','packages.lock.json','bun.lock','bun.lockb'}
+           if not files:return False
+           for f in files:
+            p=pathlib.PurePosixPath(f['filename']);leaf=p.name
+            if f.get('status')=='removed':return False
+            if leaf in allowed or (leaf.startswith('requirements') and leaf.endswith('.txt')) or p.suffix in ['.csproj','.fsproj','.vbproj']:continue
+            if str(p).startswith('.github/workflows/') and os.environ.get('ECOSYSTEM','').replace('-','_')=='github_actions':
+             patch=f.get('patch','');lines=[line[1:] for line in patch.splitlines() if line.startswith(('+','-')) and not line.startswith(('+++','---'))]
+             import re
+             if lines and all(re.match(r'^\s*-?\s*uses:\s*[^\s]+@[^\s]+(?:\s*#.*)?$',line) for line in lines):continue
+            return False
+           return True
+          def version(value):
+           import re
+           m=re.fullmatch(r'v?(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?',str(value))
+           return tuple(int(x or 0) for x in m.groups()) if m else None
+          def affected(value,constraint):
+           import re
+           v=version(value)
+           if v is None:return False
+           for group in constraint.replace('||','|').split('|'):
+            tokens=list(re.finditer(r'(<=|>=|<|>|==|=)?\s*v?(\d+(?:\.\d+){0,3})',group));rest=re.sub(r'(<=|>=|<|>|==|=)?\s*v?(\d+(?:\.\d+){0,3})','',group)
+            if rest.replace(',','').strip() or not tokens:continue
+            matches=[]
+            for token in tokens:
+             parts=tuple(int(p) for p in token[2].split('.'));other=parts+(0,)*(4-len(parts));op=token[1] or '='
+             matches.append({'<':v<other,'<=':v<=other,'>':v>other,'>=':v>=other,'=':v==other,'==':v==other}[op])
+            if all(matches):return True
+           return False
+          def fixed_alerts(deps,alerts):
+           fixed=[]
+           for dep in deps:
+            prev=dep.get('prevVersion','');new=dep.get('newVersion','');new_v=version(new)
+            if new_v is None:continue
+            directory=pathlib.PurePosixPath('/'+dep.get('directory','/').strip('/'))
+            for alert in alerts:
+             if alert['state']!='open' or alert['dependency']['package']['name']!=dep['dependencyName']:continue
+             manifest=pathlib.PurePosixPath('/'+alert['dependency']['manifest_path'].lstrip('/'))
+             if manifest.parent!=directory:continue
+             vulnerability=alert['security_vulnerability'];patch=vulnerability.get('first_patched_version') or {};minimum=version(patch.get('identifier',''))
+             if minimum is not None and new_v>=minimum and affected(prev,vulnerability['vulnerable_version_range']) and not affected(new,vulnerability['vulnerable_version_range']):fixed.append(alert['number'])
+           return sorted(set(fixed))
+          if os.environ.get('UPDATE_TYPE') not in ['version-update:semver-patch','version-update:semver-minor']:
+           print('This PR needs manual review.');sys.exit(0)
+          pr=api(f'repos/{repo}/pulls/{number}');files=api(f'repos/{repo}/pulls/{number}/files')
+          if not eligible(pr,files):print('PR provenance or file scope needs manual review.');sys.exit(0)
+          deps=json.loads(os.environ['UPDATED_DEPENDENCIES']);alerts=api(f'repos/{repo}/dependabot/alerts?state=open&per_page=100');fixed=fixed_alerts(deps,alerts)
+          if not fixed:print('No matching open alert is demonstrably fixed. Leaving PR open.');sys.exit(0)
+          print('Verified fixes for security alerts: '+', '.join(str(n) for n in fixed))
+          workflow_cache={}
+          for attempt in range(120):
+           pr=api(f'repos/{repo}/pulls/{number}')
+           if not eligible(pr,files):print('PR changed while waiting.');sys.exit(0)
+           runs=api(f'repos/{repo}/actions/workflows/security-dependency-ci.yml/runs?event=pull_request&head_sha={expected}&per_page=10').get('workflow_runs',[])
+           if runs:
+            ci=max(runs,key=lambda r:r['id'])
+            if ci['status']=='completed' and ci['conclusion']!='success':print('Dependency validation failed. Leaving PR open.');sys.exit(0)
+            if ci['status']=='completed':
+             checks=api(f'repos/{repo}/commits/{expected}/check-runs?filter=latest&per_page=100')
+             checks=checks if isinstance(checks,list) else [checks];checks=[c for page in checks for c in page.get('check_runs',[])]
+             import re
+             latest_checks={}
+             for check in sorted(checks,key=lambda c:c['id'],reverse=True):
+              slug=check.get('app',{}).get('slug','');workflow=None
+              match=re.fullmatch(r'https://github.com/'+re.escape(repo)+r'/actions/runs/(\d+)/job/\d+(?:\?.*)?',check.get('details_url',''))
+              if slug=='github-actions' and match:
+               run_id=match[1]
+               if run_id not in workflow_cache:workflow_cache[run_id]=api(f'repos/{repo}/actions/runs/{run_id}')
+               workflow=workflow_cache[run_id]
+               if workflow.get('path')=='.github/workflows/dependabot-security-automerge.yml':continue
+              key=(slug,(workflow or {}).get('workflow_id'),check['name'])
+              latest_checks.setdefault(key,check)
+             checks=list(latest_checks.values())
+             statuses=api(f'repos/{repo}/commits/{expected}/status').get('statuses',[])
+             # Dependabot PRs can produce multiple statuses per context. Only the newest applies.
+             latest={}
+             for s in statuses:latest.setdefault(s['context'],s)
+             failed=[c['name'] for c in checks if c['status']=='completed' and c['conclusion'] not in ['success','skipped','neutral']]
+             failed += [s['context'] for s in latest.values() if s['state'] in ['error','failure']]
+             if failed:print('Other CI checks failed: '+', '.join(failed));sys.exit(0)
+             pending=any(c['status']!='completed' for c in checks) or any(s['state']=='pending' for s in latest.values())
+             if not pending:
+              # The merge API verifies the current PR head and respects any existing branch rules.
+              subprocess.run(['gh','pr','merge',number,'--repo',repo,'--squash','--match-head-commit',expected],check=True)
+              print('Verified security update merged.');sys.exit(0)
+           time.sleep(15)
+          print('CI did not complete within 30 minutes. Leaving PR open.')
+          PYCODE
